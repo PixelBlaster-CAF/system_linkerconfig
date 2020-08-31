@@ -28,6 +28,7 @@
 #include <sys/types.h>
 
 #include <android-base/result.h>
+#include <android-base/strings.h>
 
 #include "linkerconfig/apex.h"
 #include "linkerconfig/apexconfig.h"
@@ -43,6 +44,7 @@
 
 using android::base::ErrnoError;
 using android::base::Error;
+using android::base::Join;
 using android::base::Result;
 using android::linkerconfig::contents::Context;
 using android::linkerconfig::modules::ApexInfo;
@@ -55,8 +57,8 @@ const static struct option program_options[] = {
 #ifndef __ANDROID__
     {"root", required_argument, 0, 'r'},
     {"vndk", required_argument, 0, 'v'},
+    {"product_vndk", required_argument, 0, 'p'},
     {"recovery", no_argument, 0, 'y'},
-    {"legacy", no_argument, 0, 'l'},
 #endif
     {"help", no_argument, 0, 'h'},
     {0, 0, 0, 0}};
@@ -66,8 +68,8 @@ struct ProgramArgs {
   bool strict;
   std::string root;
   std::string vndk_version;
+  std::string product_vndk_version;
   bool is_recovery;
-  bool is_legacy;
 };
 
 [[noreturn]] void PrintUsage(int status = EXIT_SUCCESS) {
@@ -76,8 +78,8 @@ struct ProgramArgs {
 #ifndef __ANDROID__
                " --root <root dir>"
                " --vndk <vndk version>"
+               " --product_vndk <product vndk version>"
                " --recovery"
-               " --legacy"
 #endif
                " [--help]"
             << std::endl;
@@ -95,7 +97,7 @@ std::string RealPath(std::string_view path) {
 bool ParseArgs(int argc, char* argv[], ProgramArgs* args) {
   int parse_result;
   while ((parse_result = getopt_long(
-              argc, argv, "t:sr:v:hyl", program_options, NULL)) != -1) {
+              argc, argv, "t:sr:v:ep:hyl", program_options, NULL)) != -1) {
     switch (parse_result) {
       case 't':
         args->target_directory = optarg;
@@ -109,11 +111,11 @@ bool ParseArgs(int argc, char* argv[], ProgramArgs* args) {
       case 'v':
         args->vndk_version = optarg;
         break;
+      case 'p':
+        args->product_vndk_version = optarg;
+        break;
       case 'y':
         args->is_recovery = true;
-        break;
-      case 'l':
-        args->is_legacy = true;
         break;
       case 'h':
         PrintUsage();
@@ -131,13 +133,14 @@ bool ParseArgs(int argc, char* argv[], ProgramArgs* args) {
 
 void LoadVariables(ProgramArgs args) {
 #ifndef __ANDROID__
-  if (!args.is_recovery && (args.root == "" || args.vndk_version == "")) {
+  if (!args.is_recovery && args.root == "") {
     PrintUsage();
   }
   android::linkerconfig::modules::Variables::AddValue("ro.vndk.version",
                                                       args.vndk_version);
+  android::linkerconfig::modules::Variables::AddValue(
+      "ro.product.vndk.version", args.product_vndk_version);
 #endif
-
   if (!args.is_recovery) {
     android::linkerconfig::generator::LoadVariables(args.root);
   }
@@ -239,14 +242,6 @@ Result<void> GenerateRecoveryLinkerConfiguration(Context& ctx,
       false);
 }
 
-Result<void> GenerateLegacyLinkerConfiguration(Context& ctx,
-                                               const std::string& dir_path) {
-  return GenerateConfiguration(
-      android::linkerconfig::contents::CreateLegacyConfiguration(ctx),
-      dir_path,
-      false);
-}
-
 Result<void> GenerateApexConfiguration(
     const std::string& base_dir, android::linkerconfig::contents::Context& ctx,
     const android::linkerconfig::modules::ApexInfo& target_apex) {
@@ -270,6 +265,22 @@ void GenerateApexConfigurations(Context& ctx, const std::string& dir_path) {
       }
     }
   }
+}
+
+void GenerateJniConfig(Context& ctx, const std::string& dir_path) {
+  if (dir_path == "") {
+    return;
+  }
+  std::string file_path = dir_path + "/jni.config.txt";
+  std::ofstream out(file_path);
+  for (auto const& apex_item : ctx.GetApexModules()) {
+    if (!apex_item.jni_libs.empty()) {
+      out << apex_item.namespace_name << " " << Join(apex_item.jni_libs, ":")
+          << '\n';
+    }
+  }
+  out.close();
+  UpdatePermission(file_path);
 }
 
 void ExitOnFailure(Result<void> task) {
@@ -307,22 +318,27 @@ int main(int argc, char* argv[]) {
     PrintUsage(EXIT_FAILURE);
   }
 
+  if (!android::linkerconfig::modules::IsLegacyDevice() &&
+      android::linkerconfig::modules::IsVndkLiteDevice()) {
+    LOG(ERROR) << "Linkerconfig no longer supports VNDK-Lite configuration";
+    exit(EXIT_FAILURE);
+  }
+
   LoadVariables(args);
   Context ctx = GetContext(args);
 
-  // when exec'ed from init, this is 0x0077, which makes the subdirectories
-  // inaccessible for others. set umask to 0x0022 so that they can be
+  // when exec'ed from init, this is 077, which makes the subdirectories
+  // inaccessible for others. set umask to 022 so that they can be
   // accessible.
-  umask(0x0022);
+  umask(022);
 
   if (args.is_recovery) {
     ExitOnFailure(
         GenerateRecoveryLinkerConfiguration(ctx, args.target_directory));
-  } else if (args.is_legacy) {
-    ExitOnFailure(GenerateLegacyLinkerConfiguration(ctx, args.target_directory));
   } else {
     ExitOnFailure(GenerateBaseLinkerConfiguration(ctx, args.target_directory));
     GenerateApexConfigurations(ctx, args.target_directory);
+    GenerateJniConfig(ctx, args.target_directory);
   }
 
   return EXIT_SUCCESS;

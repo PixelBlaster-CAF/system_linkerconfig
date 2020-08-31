@@ -20,7 +20,6 @@
 #include "linkerconfig/namespacebuilder.h"
 
 using android::linkerconfig::modules::ApexInfo;
-using android::linkerconfig::modules::AsanPath;
 using android::linkerconfig::modules::Namespace;
 
 namespace android {
@@ -35,9 +34,7 @@ Namespace BuildArtNamespace([[maybe_unused]] const Context& ctx,
   Namespace ns(apex.namespace_name,
                /*is_isolated=*/true,
                /*is_visible=*/!ctx.IsVendorSection());
-
-  ns.AddSearchPath("/apex/com.android.art/${LIB}", AsanPath::SAME_PATH);
-  ns.AddPermittedPath("/system/${LIB}");
+  InitializeWithApex(ns, apex);
 
   if (ctx.IsApexBinaryConfig()) {
     // JVMTI libraries used in ART testing are located under /data; dalvikvm has
@@ -53,39 +50,13 @@ Namespace BuildArtNamespace([[maybe_unused]] const Context& ctx,
 
   // Primary boot image is loaded through dlopen, so pass the primary boot image
   // to the list of paths.
-  ns.AddPermittedPath("/apex/com.android.art/javalib", AsanPath::SAME_PATH);
+  ns.AddPermittedPath("/apex/com.android.art/javalib");
 
   // Need allow_all_shared_libs to let libart.so dlopen oat files in
   // /system/framework and /data.
   // TODO(b/130340935): Use a dynamically created linker namespace similar to
   // classloader-namespace for oat files, and tighten this up.
   ns.GetLink(ctx.GetSystemNamespaceName()).AllowAllSharedLibs();
-
-  ns.AddProvides(std::vector{
-      "libandroidicu.so",
-      "libandroidio.so",
-      "libdexfile_external.so",
-      "libdexfiled_external.so",
-      "libnativebridge.so",
-      "libnativehelper.so",
-      "libnativeloader.so",
-      // TODO(b/122876336): Remove libpac.so once it's migrated to Webview
-      "libpac.so",
-      // TODO(b/120786417 or b/134659294): libicuuc.so
-      // and libicui18n.so are kept for app compat.
-      "libicui18n.so",
-      "libicuuc.so",
-  });
-  ns.AddRequires(std::vector{
-      "libadbconnection_client.so",
-      "libc.so",
-      "libdl.so",
-      "libdl_android.so",
-      "liblog.so",
-      "libm.so",
-      // not listed in the manifest, but add here to preserve original configuration
-      "libneuralnetworks.so",
-  });
 
   return ns;
 }
